@@ -1,0 +1,211 @@
+---
+title: "Field Practice Coursework"
+subtitle: "Replication of: Lee et al. (2026). https://doi.org/10.1007/s42113-026-00330-7"
+author: "Boglarka Ludmany"
+date: "2026-10-25"
+output: html_document
+---
+# 1. FLANKER
+## Libraries
+```{r}
+install.packages("schoRsch")
+install.packages("readxl")
+install.packages("ez")
+library(schoRsch)
+library(tidyverse)
+library(dplyr)
+library(readxl)
+library(ez)
+```
+
+## Instructions - all commented
+```{r}
+# Instructions for data
+# This spreadsheet contains the 2x2-AFC flanker data with SOA manipulation.  
+# The first column includes participants' number.
+# The second column is the trial number in the experiment. 
+# The third column represents the orientation of the target arrow shown in a particular trial, where 1 for left, 2 for right, 3 for upward and 4 for downward. 
+# The forth column shows the orientation of the flanker arrows in the same notion as the third column. 
+# The fifth column reveals the RT of the trial in milliseconds. whether the trial is correct or not, where 1 is correct, and 0 means incorrect. 
+# The sixth column shows whether the trial is correct or not, where 1 is correct, and 0 means incorrect.  the congreuncy condition of the trial, where 1 for congruent and 0 for incongruent.
+# The seventh column shows the congreuncy condition of the trial, where 1 for congruent and 0 for incongruent. 
+# The final column records the SOA levels, including -100, 0, 50, 100. Note hat the sign of the SOA in the this spreadsheet is opposite to what we define in the manuscript. 
+```
+
+
+## Reading data 
+
+```{r}
+rm(list = ls())
+which_dat = "FlankerSOA-repl.xlsx"
+data = readxl::read_excel(which_dat)
+```
+
+## pre_processing
+```{r}
+raw_data <- data %>% 
+  mutate(prev_Congruency = dplyr::lag(data$Congruency), 
+         prev_Accuracy = dplyr::lag(data$Accuracy))
+
+processed_data = raw_data[raw_data$RT >= 200 & raw_data$RT <= 1500,]
+processed_data = processed_data[!(processed_data$`Trial Number` %in% c(1, 121, 241, 361, 481, 601, 721, 841)),]
+processed_data = processed_data[processed_data$Accuracy == 1 & processed_data$prev_Accuracy == 1,]
+```
+
+## ANOVA
+```{r}
+processed_data$Participant = as.factor(processed_data$Participant)
+processed_data$Congruency = as.factor(processed_data$Congruency)
+processed_data$prev_Congruency = as.factor(processed_data$prev_Congruency)
+processed_data$SOA = as.factor(processed_data$SOA)
+
+aov.rt = ezANOVA(processed_data,
+                 dv = RT,
+                 wid = Participant,
+                 within = .(Congruency, prev_Congruency, SOA),
+                 detailed = TRUE,
+                 return_aov = TRUE)
+anova_out(aov.rt)
+```
+
+
+## Post-hoc analyses
+```{r}
+library(broom)
+k_data <- subset(processed_data, SOA == -50)
+aov.k = ezANOVA(k_data,dv = RT,
+                wid = Participant,
+                within = .(prev_Congruency, Congruency),
+                detailed = TRUE,
+                return_aov = TRUE)
+anova_out(aov.k)
+```
+
+## Mean error rates for experimental conditions
+```{r}
+rm(list = ls())
+data = read_excel("FlankerSOA.xlsx")
+names(data)[2] = "TrialNum"
+```
+
+## calculate variables
+```{r}
+data$n1Accuracy = lag(data$Accuracy, 1)
+data$n1Congruency = lag(data$Congruency, 1)
+data$n1ArrowNum = lag(data$ArrowNum, 1)
+firsttrials = c(0:7)*120+1
+```
+
+## exclude trials
+```{r}
+fdata = data %>%
+  filter(!(TrialNum%in%firsttrials), RT >= 200, RT <= 1500)
+
+gdata <- data.frame(Congruency=fdata$Congruency, 
+                    n1Congruency=fdata$n1Congruency,
+                    SOA=fdata$SOA,
+                    Accuracy=fdata$Accuracy)
+
+gdata %>% group_by(Congruency,n1Congruency,SOA) %>% summarise (x = mean(Accuracy))
+```
+
+# 2. SPATIAL STROOP
+```{r}
+rm(list = ls())
+which_dat = "spatialStroopSOA.xlsx"
+data = readxl::read_excel(which_dat)
+```
+
+# pre_processing
+```{r}
+data$prev_Congruency = dplyr::lag(data$Congruency)
+data$prev_Accuracy = dplyr::lag(data$Accuracy)
+data = data[data$RT >= 200 & data$RT <= 1500,]
+data = data[!(data$`Trial Number` %in% c(1, 121, 241, 361, 481, 601, 721, 841)),]
+data = data[data$Accuracy == 1 & data$prev_Accuracy == 1,]
+```
+
+
+## ANOVA
+```{r}
+data$Participant = as.factor(data$Participant)
+data$Congruency = as.factor(data$Congruency)
+data$prev_Congruency = as.factor(data$prev_Congruency)
+data$SOA = as.factor(data$SOA)
+
+aov.rt = ezANOVA(data,
+                 dv = RT,
+                 wid = Participant,
+                 within = .(Congruency, prev_Congruency, SOA),
+                 detailed = TRUE,
+                 return_aov = TRUE)
+anova_out(aov.rt)
+
+```
+
+## Post-hoc analyses
+```{r}
+library(broom)
+cong_data<-subset(data, Congruency == 1)
+aov.cong = ezANOVA(cong_data,dv = RT,
+                  wid = Participant,
+                  within = .(prev_Congruency),
+                  detailed = TRUE,
+                  return_aov = TRUE)
+anova_out(aov.cong)
+
+incong_data<-subset(data, Congruency == 0)
+aov.incong = ezANOVA(incong_data,dv = RT,
+                   wid = Participant,
+                   within = .(prev_Congruency),
+                   detailed = TRUE,
+                   return_aov = TRUE)
+anova_out(aov.incong)
+
+k_data<-subset(data, SOA == -100 | SOA == -50)
+aov.k = ezANOVA(k_data,dv = RT,
+                   wid = Participant,
+                   within = .(prev_Congruency, Congruency),
+                   detailed = TRUE,
+                   return_aov = TRUE)
+anova_out(aov.k)
+```
+
+
+## Mean error rates for experimental conditions
+```{r}
+rm(list = ls())
+data = read_excel("spatialStroopSOA.xlsx")
+names(data)[2] = "TrialNum"
+```
+
+
+## calculate variables
+```{r}
+data$n1Accuracy = lag(data$Accuracy, 1)
+data$n1Congruency = lag(data$Congruency, 1)
+data$n1ArrowNum = lag(data$ArrowNum, 1)
+firsttrials = c(0:7)*120+1
+```
+
+## exclude trials
+```{r}
+fdata = data %>%
+  filter(!(TrialNum%in%firsttrials), RT >= 200, RT <= 1500)
+
+gdata <- data.frame(Congruency=fdata$Congruency, 
+                    n1Congruency=fdata$n1Congruency,
+                    SOA=fdata$SOA,
+                    Accuracy=fdata$Accuracy)
+
+gdata %>% group_by(Congruency,n1Congruency,SOA) %>% summarise (x = mean(Accuracy))
+```
+
+
+# 3. PLOTS: 
+```{r}
+# soa, mean CSE, mean ce, error bar ce and cse
+# -> for both stroop and flanker
+# so first: save all relevant csv-s, then import them to the plotting rmd
+```
+
