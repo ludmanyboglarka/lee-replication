@@ -1,0 +1,120 @@
+---
+title: "Field Practice Coursework"
+subtitle: "Replication of: Lee et al. (2026). https://doi.org/10.1007/s42113-026-00330-7. Analysis scripts for the CE and CSE analyses in the Spatial Stroop task."
+author: "Boglarka Ludmany"
+date: "2026-10-26"
+output: html_document
+---
+
+# LIBRARIES
+```{r}
+install.packages("schoRsch")
+install.packages("readxl")
+install.packages("ez")
+library(schoRsch)
+library(tidyverse)
+library(dplyr)
+library(readxl)
+library(ez)
+```
+
+
+# 2. SPATIAL STROOP
+```{r}
+rm(list = ls())
+which_dat = "spatialStroopSOA-repl.xlsx"
+stroop_data = readxl::read_excel(which_dat)
+```
+
+# pre_processing
+```{r}
+stroop_data$prev_Congruency = dplyr::lag(stroop_data$Congruency)
+stroop_data$prev_Accuracy = dplyr::lag(stroop_data$Accuracy)
+
+# data filtering
+filtered_data = stroop_data[stroop_data$RT >= 200 & stroop_data$RT <= 1500,]
+
+# filtering out trials - they sure do have an explanation for this lol
+processed_data = filtered_data[!(filtered_data$`Trial Number` %in% c(1, 121, 241, 361, 481, 601, 721, 841)),]
+
+# only correct trials
+processed_data = processed_data %>% 
+  filter(Accuracy == 1, 
+         prev_Accuracy == 1)
+```
+
+
+## ANOVA
+```{r}
+processed_data$Participant = as.factor(processed_data$Participant)
+processed_data$Congruency = as.factor(processed_data$Congruency)
+processed_data$prev_Congruency = as.factor(processed_data$prev_Congruency)
+processed_data$SOA = as.factor(processed_data$SOA)
+
+aov.rt = ezANOVA(processed_data,
+                 dv = RT,
+                 wid = Participant,
+                 within = .(Congruency, prev_Congruency, SOA),
+                 detailed = TRUE,
+                 return_aov = TRUE)
+anova_out(aov.rt)
+
+```
+
+## Post-hoc analyses
+```{r}
+library(broom)
+cong_data<-subset(processed_data, Congruency == 1)
+aov.cong = ezANOVA(cong_data,dv = RT,
+                  wid = Participant,
+                  within = .(prev_Congruency),
+                  detailed = TRUE,
+                  return_aov = TRUE)
+anova_out(aov.cong)
+
+incong_data<-subset(processed_data, Congruency == 0)
+aov.incong = ezANOVA(incong_data,dv = RT,
+                   wid = Participant,
+                   within = .(prev_Congruency),
+                   detailed = TRUE,
+                   return_aov = TRUE)
+anova_out(aov.incong)
+
+k_data<-subset(processed_data, SOA == -100 | SOA == -50)
+aov.k = ezANOVA(k_data,dv = RT,
+                   wid = Participant,
+                   within = .(prev_Congruency, Congruency),
+                   detailed = TRUE,
+                   return_aov = TRUE)
+anova_out(aov.k)
+```
+
+
+## Mean error rates for experimental conditions
+```{r}
+rm(list = ls())
+data = read_excel("spatialStroopSOA-repl.xlsx")
+names(data)[2] = "TrialNum"
+```
+
+
+## calculate variables
+```{r}
+data$n1Accuracy = lag(data$Accuracy, 1)
+data$n1Congruency = lag(data$Congruency, 1)
+data$n1ArrowNum = lag(data$ArrowNum, 1)
+firsttrials = c(0:7)*120+1
+```
+
+## exclude trials
+```{r}
+fdata = data %>%
+  filter(!(TrialNum%in%firsttrials), RT >= 200, RT <= 1500)
+
+gdata <- data.frame(Congruency=fdata$Congruency, 
+                    n1Congruency=fdata$n1Congruency,
+                    SOA=fdata$SOA,
+                    Accuracy=fdata$Accuracy)
+
+gdata %>% group_by(Congruency,n1Congruency,SOA) %>% summarise (x = mean(Accuracy))
+```
