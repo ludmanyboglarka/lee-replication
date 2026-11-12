@@ -1,0 +1,124 @@
+# Flanker SOA x congruency-sequence (CSE): preprocessing
+# R translation of Flanker_SOA_CSE_readdata.m -> from the osf repo
+#
+# Input : raw trial file (FlankerSOA-repl.xlsx), 8 columns, in MATLAB's order:
+#           1 participant | 2 trial number | 5 RT (ms) | 6 accuracy (1/0)
+#           7 congruency of the trial (1 = congruent, 0 = incongruent) | 8 SOA
+#         (columns 3 and 4 are not used by the script)
+# Output: one row per sequence x SOA cell (4 x 4 = 16 rows) with
+#           e1..e6 : group-mean RT bin edges (10/30/50/70/90/100th percentile)
+#           f1..f6 : observed frequency in each correct-RT bin
+#           f_err  : observed error frequency
+#         -> data/flanker_cse_observed.csv, the file the Rust fitter reads.
+#
+# Sequence names: first letter = PREVIOUS trial, second = CURRENT trial
+#   (c = congruent, i = incongruent), so cc, ci, ic, ii. Same as the .m file.
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(readxl)
+
+in_file  <- "..//data/FlankerSOA-repl.csv"                      # or "FlankerSOA.xlsx"
+out_file <- "flanker_cse_observed.csv"
+
+soas <- c(100, 0, -50, -100) # soa conditions
+block_starts <- c(1, 121, 241, 361, 481, 601, 721, 841)
+probs <- c(.1, .3, .5, .7, .9, 1) # prctile 10,30,50,70,90,100
+
+# 1. read 
+
+raw <- if (grepl("\\.xlsx?$", in_file)) readxl::read_excel(in_file) else read_csv(in_file, show_col_types = FALSE) # built-in xlsx detector lol
+
+trials <- raw |>
+  select(ppt = 1, trial = 2, rt = 5, acc = 6, cong = 7, soa = 8)
+
+# 2. label each trial with its congruency sequence 
+# lag prev trial -> if its trial number is exactly previous + 1. That drops the first trial of the
+# file and any trial following a gap, like the `Ppt{n}(k+1,2)-Ppt{n}(k,2)==1` test.
+seq_trials <- trials |>
+  group_by(ppt) |>
+  mutate(prev_cong = lag(cong),
+         step = trial - lag(trial)) |>
+  ungroup() |>
+  filter(step == 1) |>
+  mutate(seq = case_when(
+    prev_cong == 1 & cong == 1 ~ "cc",
+    prev_cong == 1 & cong == 0 ~ "ci",
+    prev_cong == 0 & cong == 1 ~ "ic",
+    prev_cong == 0 & cong == 0 ~ "ii"
+  ))
+
+# 3. trim: RT outside 200-1500 ms, and the first trial of every block 
+# (done on correct and error trials alike, as in the .m file)
+seq_trials <- seq_trials |>
+  filter(rt >= 200, rt <= 1500,
+         !trial %in% block_starts) |>
+  filter(soa %in% soas)
+
+# 4. participant x cell accuracy and error counts 
+cells <- seq_trials |>
+  group_by(seq, soa, ppt) |>
+  summarise(acc_ppt = mean(acc), # cC_acc etc.
+            n_err   = sum(acc == 0), # numel of the *_err RT vectors
+            .groups = "drop")
+
+group_acc <- cells |>  # mean over participants of their accuracy
+  group_by(seq, soa) |>
+  summarise(acc_group = mean(acc_ppt), .groups = "drop")
+
+# 5. bin edges: per-participant quantiles of CORRECT RTs, averaged over ppts
+# in MATLAB: prctile == quantile(type = 5).
+edges <- seq_trials |>
+  filter(acc == 1) |>
+  group_by(seq, soa, ppt) |>
+  reframe(q_id = seq_along(probs),
+          q = quantile(rt, probs, type = 5, names = FALSE)) |>
+  group_by(seq, soa, q_id) |>
+  summarise(edge = mean(q), .groups = "drop") |>
+  pivot_wider(names_from = q_id, values_from = edge, names_prefix = "e")
+
+# 6. put each correct trial in a bin, using the GROUP edges
+# bin 1: rt <= e1;  bin k: e(k-1) < rt <= e(k);  rt above e6 falls in no bin
+# (the .m file does the same, so those trials are simply not counted).
+binned <- seq_trials |>
+  filter(acc == 1) |>
+  left_join(edges, by = c("seq", "soa")) |>
+  mutate(bin = 1 + (rt > e1) + (rt > e2) + (rt > e3) + (rt > e4) + (rt > e5),
+         bin = if_else(rt > e6, NA_real_, bin)) |>
+  filter(!is.na(bin))
+
+# trials per bin per participant (zero-filled), then mean over participants
+bin_counts <- cells |>
+  select(seq, soa, ppt) |>
+  crossing(bin = 1:6) |>
+  left_join(count(binned, seq, soa, ppt, bin), by = c("seq", "soa", "ppt", "bin")) |>
+  mutate(n = replace_na(n, 0L))
+
+# 7. observed frequencies (as defined in the .m file) 
+# correct bins: mean count per participant x mean accuracy       (frq_cc, ...)
+f_correct <- bin_counts |>
+  group_by(seq, soa, bin) |>
+  summarise(mean_n = mean(n), .groups = "drop") |>
+  left_join(group_acc, by = c("seq", "soa")) |>
+  mutate(f = mean_n * acc_group) |>
+  select(seq, soa, bin, f) |>
+  pivot_wider(names_from = bin, values_from = f, names_prefix = "f")
+
+# error bin: mean over participants of (their error count x group error rate)  (frq_cc_err, ...)
+f_error <- cells |>
+  left_join(group_acc, by = c("seq", "soa")) |>
+  group_by(seq, soa) |>
+  summarise(f_err = mean(n_err * (1 - acc_group)), .groups = "drop")
+
+# 8. assemble and write 
+observed <- edges |>
+  left_join(f_correct, by = c("seq", "soa")) |>
+  left_join(f_error, by = c("seq", "soa")) |>
+  mutate(seq = factor(seq, levels = c("cc", "ci", "ic", "ii")),
+         soa = factor(soa, levels = soas)) |>
+  arrange(seq, soa) |>
+  mutate(soa = as.numeric(as.character(soa)), seq = as.character(seq))
+
+write_csv(observed, out_file)
+print(observed, width = Inf)

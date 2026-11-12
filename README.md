@@ -11,15 +11,16 @@ This repository currently contains the R analysis scripts that test the presence
 The implementation of the revised diffusion model for conflict tasks (Lee and Sewell, 2024) in R is a work in progress, with availability expected in the future.
 *(Lee, P.-S., & Sewell, D. K. (2024). A revised diffusion model for conflict tasks. Psychonomic Bulletin & Review, 31(1), 1–31. https://doi.org/10.3758/s13423-023-02288-0)*
 
-### Cargo dependencies: 
+### Cargo crates: 
 - `rayon`: parallel trial simulation
 - `rand` + `rand_distr`: RNG and normal draws
 - `serde`, `toml`, `csv`: configs and I/O
 - `clap`: command_line arguments
 - `anyhow`: error handling
+- `argmin`: optional, for Nelder-Mead
 
 ### Filesystem:
-```rdmc-fit/
+`rdmc-fit/
 ├── Cargo.toml
 ├── .gitignore            # target/, results/
 ├── data/                 # observed RT quantiles, error rates (CSV)
@@ -33,4 +34,4 @@ The implementation of the revised diffusion model for conflict tasks (Lee and Se
 │   ├── objective.rs      # G² / chi-square over 6 RT bins + error bin
 │   └── optim.rs          # Nelder-Mead (SIMPLEX) loop
 ├── benches/              # criterion
-└── tests/                # e.g. checks, tests of parameters```
+└── tests/                # e.g. checks, tests of parameters`
