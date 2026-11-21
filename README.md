@@ -19,8 +19,8 @@ The implementation of the revised diffusion model for conflict tasks (Lee and Se
 - `anyhow`: error handling
 - `argmin`: optional, for Nelder-Mead
 
-### Filesystem:
-`rdmc-fit/
+### Repository layout:
+`rdmc-fit
 ├── Cargo.toml
 ├── .gitignore            # target/, results/
 ├── data/                 # observed RT quantiles, error rates (CSV)
@@ -35,3 +35,15 @@ The implementation of the revised diffusion model for conflict tasks (Lee and Se
 │   └── optim.rs          # Nelder-Mead (SIMPLEX) loop
 ├── benches/              # criterion
 └── tests/                # e.g. checks, tests of parameters`
+
+### Pipeline: 
+`data/raw/FlankerSOA-repl.xlsx
+        │  r/01_preprocess.R
+        ▼
+data/flanker_cse_observed.csv      (bin edges + observed frequencies per condition)
+        │  cargo run --release -- fit ...
+        ▼
+results/                           (fitted parameters, deviance, predicted quantiles)
+        │  r/03_plots.R, r/04_model_comparison.R
+        ▼
+figures + chi-square difference tests`
