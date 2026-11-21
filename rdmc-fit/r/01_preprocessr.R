@@ -99,17 +99,13 @@ bin_counts <- cells |>
 # correct bins: mean count per participant x mean accuracy       (frq_cc, ...)
 f_correct <- bin_counts |>
   group_by(seq, soa, bin) |>
-  summarise(mean_n = mean(n), .groups = "drop") |>
-  left_join(group_acc, by = c("seq", "soa")) |>
-  mutate(f = mean_n * acc_group) |>
-  select(seq, soa, bin, f) |>
+  summarise(f = mean(n), .groups = "drop") |>
   pivot_wider(names_from = bin, values_from = f, names_prefix = "f")
 
 # error bin: mean over participants of (their error count x group error rate)  (frq_cc_err, ...)
 f_error <- cells |>
-  left_join(group_acc, by = c("seq", "soa")) |>
   group_by(seq, soa) |>
-  summarise(f_err = mean(n_err * (1 - acc_group)), .groups = "drop")
+  summarise(f_err = mean(n_err), .groups = "drop")
 
 # ---- 8. assemble and write ------------------------------------------------------
 observed <- edges |>
