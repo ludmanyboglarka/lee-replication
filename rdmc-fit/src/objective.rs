@@ -1,0 +1,246 @@
+//! G² objective (replaces `flanker_CSE_SOA.m`).
+//!
+//! For each condition: simulate trials, add non-decision time, bin the correct RTs
+//! with the observed edges, count errors, turn the 7 counts into proportions,
+//! scale to the observed total, and compare with G² = 2 * sum O * ln(O / E).
+//!
+//! Differences from the MATLAB code:
+//!   * first-passage rule (stop at the first boundary crossed)
+//!   * predicted error count is the real number of simulated errors
+//!   * each condition uses its own simulated accuracy
+//!   * expected counts have a small floor, and no stored paths
+//!   * fixed seed per condition, so the objective is deterministic
+
+use anyhow::{ensure, Result};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+use rayon::prelude::*;
+
+use crate::data::Condition;
+use crate::model::{simulate_trial, Outcome, TrialParams};
+
+/// Total RT (decision + non-decision, ms) at or above this is dropped, as in the .m file.
+const MAX_RT: f64 = 1500.0;
+/// Floor on an expected count, so an empty simulated bin gives a large but finite penalty.
+const E_FLOOR: f64 = 1e-6;
+/// Returned when a condition (or the whole objective) cannot be evaluated.
+const INVALID: f64 = 1e9;
+
+/// Everything the simulator needs for one condition.
+#[derive(Debug, Clone, Copy)]
+pub struct ConditionModel {
+    pub trial: TrialParams,
+    /// Mean non-decision time (ms).
+    pub ter: f64,
+    /// Width of the uniform non-decision-time range (ms): Ter +/- std/2.
+    pub std: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Settings {
+    pub n_trials: usize,
+    pub seed: u64,
+}
+
+/// Index (0..6) of the bin a correct RT falls in, or None if it is above the last edge.
+fn bin_of(rt: f64, edges: &[f64; 6]) -> Option<usize> {
+    edges.iter().position(|&e| rt <= e)
+}
+
+/// Uniform draw in [0, 1) from raw random bits.
+fn uniform01<R: Rng + ?Sized>(rng: &mut R) -> f64 {
+    (rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// One simulated trial: Some((rt in ms, correct)), or None if it timed out / is too slow.
+fn simulate_one<R: Rng + ?Sized>(m: &ConditionModel, rng: &mut R) -> Option<(f64, bool)> {
+    let (step, correct) = match simulate_trial(&m.trial, rng) {
+        Outcome::Correct { step } => (step, true),
+        Outcome::Error { step } => (step, false),
+        Outcome::Timeout => return None,
+    };
+    let rt = f64::from(step) + m.ter - 0.5 * m.std + m.std * uniform01(rng);
+    if rt >= MAX_RT {
+        None
+    } else {
+        Some((rt, correct))
+    }
+}
+
+/// A different, reproducible seed for every condition.
+fn condition_seed(base: u64, index: usize) -> u64 {
+    base.wrapping_add((index as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+}
+
+/// G² for one condition.
+pub fn condition_g2(obs: &Condition, model: &ConditionModel, n_trials: usize, seed: u64) -> f64 {
+    let edges = obs.edges();
+    let mut rng = StdRng::seed_from_u64(seed);
+
+    // counts[0..6] = correct RTs per bin, counts[6] = errors
+    let mut counts = [0usize; 7];
+    for _ in 0..n_trials {
+        if let Some((rt, correct)) = simulate_one(model, &mut rng) {
+            if correct {
+                if let Some(b) = bin_of(rt, &edges) {
+                    counts[b] += 1;
+                }
+            } else {
+                counts[6] += 1;
+            }
+        }
+    }
+
+    let n_binned: usize = counts.iter().sum();
+    if n_binned == 0 {
+        return INVALID;
+    }
+
+    let f = obs.freqs();
+    let observed = [f[0], f[1], f[2], f[3], f[4], f[5], obs.f_err];
+    let total = obs.total();
+
+    let mut g2 = 0.0;
+    for (&o, &c) in observed.iter().zip(counts.iter()) {
+        if o <= 0.0 {
+            continue;
+        }
+        let e = (total * c as f64 / n_binned as f64).max(E_FLOOR);
+        g2 += 2.0 * o * (o / e).ln();
+    }
+    g2
+}
+
+/// G² of every condition, in the same order as `obs`. `models[i]` belongs to `obs[i]`.
+pub fn g2_by_condition(
+    obs: &[Condition],
+    models: &[ConditionModel],
+    settings: &Settings,
+) -> Result<Vec<f64>> {
+    ensure!(
+        obs.len() == models.len(),
+        "got {} observed conditions but {} models",
+        obs.len(),
+        models.len()
+    );
+    Ok(obs
+        .par_iter()
+        .zip(models.par_iter())
+        .enumerate()
+        .map(|(i, (o, m))| condition_g2(o, m, settings.n_trials, condition_seed(settings.seed, i)))
+        .collect())
+}
+
+/// The objective: total G² over all conditions.
+pub fn deviance(
+    obs: &[Condition],
+    models: &[ConditionModel],
+    settings: &Settings,
+) -> Result<f64> {
+    // summed in a fixed order, so the result does not depend on thread scheduling
+    let total: f64 = g2_by_condition(obs, models, settings)?.iter().sum();
+    Ok(if total.is_finite() { total } else { INVALID })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_model(v_c: f64) -> ConditionModel {
+        ConditionModel {
+            trial: TrialParams { a_weight: 0.5, k: 10.0, v_a: -0.3, v_c, start: 0.0, boundary: 0.1 },
+            ter: 250.0,
+            std: 100.0,
+        }
+    }
+
+    /// "Observed" data generated by the model itself: edges at the 10/30/50/70/90/100%
+    /// quantiles of its correct RTs, counts scaled to `total` trials.
+    fn pseudo_observed(model: &ConditionModel, n: usize, seed: u64, total: f64) -> Condition {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut rts = Vec::new();
+        let mut n_err = 0usize;
+        for _ in 0..n {
+            match simulate_one(model, &mut rng) {
+                Some((rt, true)) => rts.push(rt),
+                Some((_, false)) => n_err += 1,
+                None => {}
+            }
+        }
+        rts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let q = |p: f64| rts[((p * rts.len() as f64).ceil() as usize).max(1) - 1];
+        let edges = [q(0.1), q(0.3), q(0.5), q(0.7), q(0.9), q(1.0)];
+
+        let mut counts = [0usize; 7];
+        for &rt in &rts {
+            if let Some(b) = bin_of(rt, &edges) {
+                counts[b] += 1;
+            }
+        }
+        counts[6] = n_err;
+        let n_binned: usize = counts.iter().sum();
+        let f: Vec<f64> = counts.iter().map(|&c| total * c as f64 / n_binned as f64).collect();
+
+        Condition {
+            seq: "ci".to_string(),
+            soa: 0,
+            e1: edges[0], e2: edges[1], e3: edges[2], e4: edges[3], e5: edges[4], e6: edges[5],
+            f1: f[0], f2: f[1], f3: f[2], f4: f[3], f5: f[4], f6: f[5],
+            f_err: f[6],
+        }
+    }
+
+    #[test]
+    fn same_seed_same_value() {
+        let m = test_model(0.25);
+        let obs = pseudo_observed(&m, 20_000, 1, 60.0);
+        let a = condition_g2(&obs, &m, 5_000, 7);
+        let b = condition_g2(&obs, &m, 5_000, 7);
+        assert_eq!(a, b);
+
+        let s = Settings { n_trials: 5_000, seed: 3 };
+        let d1 = deviance(&[obs.clone(), obs.clone()], &[m, m], &s).unwrap();
+        let d2 = deviance(&[obs.clone(), obs.clone()], &[m, m], &s).unwrap();
+        assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn near_zero_when_model_generated_the_data() {
+        let m = test_model(0.25);
+        let obs = pseudo_observed(&m, 20_000, 1, 60.0);
+        let g2 = condition_g2(&obs, &m, 20_000, 2);
+        println!("G2 at the generating parameters: {g2:.4}");
+        assert!(g2 < 0.5);
+    }
+
+    #[test]
+    fn increases_when_parameter_is_wrong() {
+        let good = test_model(0.25);
+        let bad = test_model(0.10);
+        let obs = pseudo_observed(&good, 20_000, 1, 60.0);
+        let g2_good = condition_g2(&obs, &good, 20_000, 2);
+        let g2_bad = condition_g2(&obs, &bad, 20_000, 2);
+        println!("G2 good {g2_good:.3}, G2 bad {g2_bad:.3}");
+        assert!(g2_bad > 5.0 && g2_bad > 10.0 * g2_good);
+    }
+
+    #[test]
+    fn length_mismatch_is_an_error() {
+        let m = test_model(0.25);
+        let obs = pseudo_observed(&m, 2_000, 1, 60.0);
+        let s = Settings { n_trials: 100, seed: 1 };
+        assert!(deviance(&[obs], &[], &s).is_err());
+    }
+}
+
+// ConditionModel holds one condition's trial parameters plus Ter and std. params.rs will build one of these per condition, in the same order as the rows from data.rs.
+// Settings holds the number of trials per condition and the base seed.
+// condition_g2 is the one-condition step. It simulates the trials, adds the non-decision-time jitter, drops timeouts and RTs of 1500 ms or more, bins the correct RTs with the observed edges, and counts the errors. It then turns the seven counts into proportions, scales them to the observed total, and computes 2·ΣO·ln(O/E).
+// g2_by_condition runs condition_g2 for all conditions in parallel and returns one G² value per condition. This will also be handy for seeing which conditions fit worst.
+// deviance adds those up and returns the single number for the optimizer. A non-finite total is replaced by a large finite value.
+
+// expected count has a floor of 1e-6 -> a bin with no simulated trials gives a large but finite
+// penalty. A condition where every trial times out returns 1e9.
+// The non-decision-time jitter is built from raw random bits (next_u64), not a rand distribution type. That avoids depending on API details that changed between rand versions.
+// Each condition gets its own seed derived from the base seed and its position. The per-condition values are collected and then summed in a fixed order, so the total doesn't depend on how the threads are scheduled.
+
