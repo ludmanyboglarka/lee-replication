@@ -22,7 +22,7 @@ library(ez)
 # 2. SPATIAL STROOP
 ```{r}
 rm(list = ls())
-which_dat = "spatialStroopSOA-repl.xlsx"
+which_dat = "data/spatialStroopSOA-repl.xlsx"
 stroop_data = readxl::read_excel(which_dat)
 ```
 
@@ -41,7 +41,56 @@ processed_data = filtered_data[!(filtered_data$`Trial Number` %in% c(1, 121, 241
 processed_data = processed_data %>% 
   filter(Accuracy == 1, 
          prev_Accuracy == 1)
+
+write.csv(processed_data, file = "processed_data.csv")
 ```
+
+## MEANS calculation -> current cong
+```{r}
+subj_means <- processed_data %>%
+  filter(Accuracy == 1) %>% 
+  mutate(Congruency = factor(Congruency, levels = c(1, 0),
+                             labels = c("congruent", "incongruent"))) %>%
+  group_by(Participant, Congruency) %>%
+  summarise(mean_rt = mean(RT), .groups = "drop")
+
+subj_means %>%
+  group_by(Congruency) %>%
+  summarise(M = mean(mean_rt), SD = sd(mean_rt), n = n())
+```
+
+## MEANS: prev_cong x cong --> for calculating cse
+```{r}
+cse_subj <- processed_data %>%
+  filter(Accuracy == 1, prev_Accuracy == 1) %>% 
+  mutate(across(c(Congruency, prev_Congruency),
+                ~ factor(.x, levels = c(1, 0), labels = c("C", "I")))) %>%
+  group_by(Participant, prev_Congruency, Congruency) %>%
+  summarise(mean_rt = mean(RT), .groups = "drop")
+
+cse_subj %>%
+  group_by(prev_Congruency, Congruency) %>%
+  summarise(M = mean(mean_rt), SD = sd(mean_rt), .groups = "drop")
+```
+## prev_cong and SOA = MEAN RTs
+```{r}
+prev_cong_rts <- processed_data %>%
+  group_by(Participant, prev_Congruency) %>%
+  summarise(mean_rt = mean(RT), .groups = "drop") %>%
+  group_by(prev_Congruency) %>%
+  summarise(M = mean(mean_rt), SD = sd(mean_rt))
+
+# SOA
+soa_rts <- processed_data %>%
+  group_by(Participant, SOA) %>%
+  summarise(mean_rt = mean(RT), .groups = "drop") %>%
+  group_by(SOA) %>%
+  summarise(M = mean(mean_rt), SD = sd(mean_rt))
+
+print(soa_rts)
+print(prev_cong_rts)
+```
+
 
 
 ## ANOVA
@@ -60,6 +109,77 @@ aov.rt = ezANOVA(processed_data,
 anova_out(aov.rt)
 
 ```
+
+## Plots - flanker
+```{r}
+summarise_se <- function(data, value, ...) {
+  data %>%
+    group_by(...) %>%
+    summarise(M  = mean({{ value }}),
+              SE = sd({{ value }}) / sqrt(n()),
+              .groups = "drop")
+}
+
+# CE by SOA
+ce_subj <- processed_data %>%
+  group_by(Participant, SOA, Congruency) %>%
+  summarise(rt = mean(RT), .groups = "drop") %>%
+  pivot_wider(names_from = Congruency, values_from = rt, names_prefix = "c") %>%
+  mutate(CE = c0 - c1)
+
+ce_sum <- summarise_se(ce_subj, CE, SOA)
+
+ce_by_soa_stroop <- ggplot(ce_sum, aes(x = factor(SOA), y = M, group = 1)) +
+  geom_line(linetype = "dashed", linewidth = 1) +
+  geom_errorbar(aes(ymin = M - SE, ymax = M + SE), width = 0.08) +
+  geom_point(shape = 21, fill = "white", size = 3, stroke = 1) +
+  scale_y_continuous(limits = c(0, 70), breaks = seq(0, 70, 10)) +
+  labs(x = "SOA (ms)",
+       y = "Congruency Effect (ms)\n(Incongruent RT - congruent RT)") +
+  theme_classic()
+ggsave(plot = ce_by_soa_stroop, "cse_by_soa_stroop.png")
+
+# CE by SOA and previous congruency
+ce_prev_subj <- processed_data %>%
+  mutate(prev = factor(prev_Congruency, levels = c(1, 0),
+                       labels = c("prev cong", "prev incong"))) %>%
+  group_by(Participant, SOA, prev, Congruency) %>%
+  summarise(rt = mean(RT), .groups = "drop") %>%
+  pivot_wider(names_from = Congruency, values_from = rt, names_prefix = "c") %>%
+  mutate(CE = c0 - c1)
+
+ce_prev_sum <- summarise_se(ce_prev_subj, CE, SOA, prev)
+
+ce_prevcong_soa <- ggplot(ce_prev_sum, aes(x = factor(SOA), y = M, colour = prev, group = prev)) +
+  geom_line(linetype = "dashed", linewidth = 1) +
+  geom_errorbar(aes(ymin = M - SE, ymax = M + SE), width = 0.08) +
+  geom_point(shape = 21, fill = "white", size = 3, stroke = 1) +
+  scale_colour_manual(values = c("prev cong" = "#8CC63F", "prev incong" = "#6A3D9A")) +
+  scale_y_continuous(limits = c(0, 80), breaks = seq(0, 80, 10)) +
+  labs(x = "SOA (ms)",
+       y = "Congruency Effect (ms)\n(Incongruent RT - congruent RT)",
+       colour = NULL) +
+  theme_classic()
+ggsave(plot = ce_prevcong_soa, "ce_prevcong_soa_stroop.png")
+
+# CSE by SOA
+cse_subj <- ce_prev_subj %>%
+  select(Participant, SOA, prev, CE) %>%
+  pivot_wider(names_from = prev, values_from = CE) %>%
+  mutate(CSE = `prev cong` - `prev incong`)
+
+cse_sum <- summarise_se(cse_subj, CSE, SOA)
+
+cse_by_soa <- ggplot(cse_sum, aes(x = factor(SOA), y = M)) +
+  geom_col(fill = "black", width = 0.3) +
+  geom_errorbar(aes(ymin = M - SE, ymax = M + SE), width = 0.08) +
+  scale_y_continuous(limits = c(0, 45), breaks = seq(0, 45, 5),
+                     expand = expansion(mult = c(0, 0.02))) +
+  labs(x = "SOA (ms)", y = "CSE (ms)") +
+  theme_classic()
+ggsave(plot = cse_by_soa, "cse_by_soa_stroop.png")
+```
+
 
 ## Post-hoc analyses
 ```{r}
@@ -90,10 +210,10 @@ anova_out(aov.k)
 ```
 
 
-## Mean error rates for experimental conditions
+## Mean error rates for experimental conditions = maybe the modeling? 
 ```{r}
 rm(list = ls())
-data = read_excel("spatialStroopSOA-repl.xlsx")
+data = read_excel("data/spatialStroopSOA-repl.xlsx")
 names(data)[2] = "TrialNum"
 ```
 
